@@ -1,0 +1,37 @@
+name: Release image to DockerHub
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*.*.*"]
+    branches:
+      - main
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set tags
+        run: |
+          if ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags') }}; then
+            echo "TAGS=falkordb/code-graph:latest,falkordb/code-graph:${{ github.ref_name }}" >> $GITHUB_ENV
+          else
+            echo "TAGS=falkordb/code-graph:edge" >> $GITHUB_ENV
+          fi
+
+      - name: Login to DockerHub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+  
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.TAGS }}

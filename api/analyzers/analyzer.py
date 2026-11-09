@@ -1,0 +1,210 @@
+from pathlib import Path
+from typing import Optional
+
+from tree_sitter import Language, Node, Parser, Point, Query, QueryCursor
+from api.entities.entity import Entity
+from api.entities.file import File
+from abc import ABC, abstractmethod
+from multilspy import SyncLanguageServer
+
+class AbstractAnalyzer(ABC):
+    def __init__(self, language: Language) -> None:
+        self.language = language
+        self.parser = Parser(language)
+        # Memoise compiled queries; tree-sitter query compilation is ~370us
+        # each and adds up to seconds on large repos.
+        self._query_cache: dict[str, Query] = {}
+
+    def _get_query(self, pattern: str) -> Query:
+        q = self._query_cache.get(pattern)
+        if q is None:
+            q = Query(self.language, pattern)
+            self._query_cache[pattern] = q
+        return q
+
+    def _captures(self, pattern: str, node: Node) -> dict:
+        """Run a tree-sitter query and return captures dict."""
+        cursor = QueryCursor(self._get_query(pattern))
+        return cursor.captures(node)
+
+    def find_parent(self, node: Node, parent_types: list) -> Node:
+        while node and node.type not in parent_types:
+            node = node.parent
+        return node
+    
+    @abstractmethod
+    def is_dependency(self, file_path: str) -> bool:
+        """
+        Check if the file is a dependency.
+
+        Args:
+            file_path (str): The file path.
+
+        Returns:
+            bool: True if the file is a dependency, False otherwise.
+        """
+
+        pass
+    
+    @abstractmethod
+    def resolve_path(self, file_path: str, path: Path) -> str:
+        """
+        Resolve the path of the file.
+
+        Args:
+            file_path (str): The file path.
+            path (Path): The path to the folder.
+
+        Returns:
+            str: The resolved path.
+        """
+
+        pass
+
+    def resolve(self, files: dict[Path, File], lsp: SyncLanguageServer, file_path: Path, path: Path, node: Node) -> list[tuple[File, Node]]:
+        try:
+            locations = lsp.request_definition(str(file_path), node.start_point.row, node.start_point.column)
+            return [(files[Path(self.resolve_path(location['absolutePath'], path))], files[Path(self.resolve_path(location['absolutePath'], path))].tree.root_node.descendant_for_point_range(Point(location['range']['start']['line'], location['range']['start']['character']), Point(location['range']['end']['line'], location['range']['end']['character']))) for location in locations if location and Path(self.resolve_path(location['absolutePath'], path)) in files]
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "resolve() failed for %s @%d:%d",
+                file_path, node.start_point.row, node.start_point.column,
+                exc_info=True,
+            )
+            return []
+
+    def needs_lsp(self) -> bool:
+        """Whether this analyzer needs an LSP server started in second_pass.
+
+        Defaults to True for backward compatibility with the original
+        jedi/multilspy-backed analyzers. Subclasses that resolve symbols
+        statically (e.g. the tree-sitter resolver in #689) override to
+        return False so the orchestrator can skip the expensive LSP
+        warm-up.
+        """
+        return True
+        
+    def build_import_index(self, files: dict[Path, File], root: Path) -> object:
+        """
+        Build a language-specific index used to resolve import statements to
+        in-repo files. Returns an opaque structure consumed by
+        ``resolve_imports``. Default: no import resolution for this language.
+
+        Args:
+            files (dict[Path, File]): All parsed files keyed by absolute path.
+            root (Path): The analyzed repository root.
+
+        Returns:
+            object: Opaque index, or ``None`` when unsupported.
+        """
+
+        return None
+
+    def resolve_imports(self, file: File, root: Path, index: object) -> list[File]:
+        """
+        Resolve the import statements of ``file`` to the in-repo files they
+        depend on. Purely syntactic by default (no LSP). Each returned File is
+        connected to ``file`` with an ``IMPORTS`` edge by the orchestrator.
+
+        Args:
+            file (File): The importing file (already parsed; ``file.tree`` set).
+            root (Path): The analyzed repository root.
+            index (object): The structure returned by ``build_import_index``.
+
+        Returns:
+            list[File]: In-repo files imported by ``file`` (deduped, self excluded).
+        """
+
+        return []
+
+    @abstractmethod
+    def add_dependencies(self, path: Path, files: list[Path]):
+        """
+        Add dependencies to the files.
+
+        Args:
+            path (Path): The path to the folder.
+            files (dict[Path, File]): The files.
+        """
+
+        pass
+    
+    @abstractmethod
+    def get_entity_label(self, node: Node) -> str:
+        """
+        Get the entity label from the node.
+
+        Args:
+            node (Node): The node.
+        
+        Returns:
+            str: The entity label.
+        """
+        pass
+
+    @abstractmethod
+    def get_entity_name(self, node: Node) -> str:
+        """
+        Get the entity name from the node.
+
+        Args:
+            node (Node): The node.
+        
+        Returns:
+            str: The entity name.
+        """
+        pass
+
+    @abstractmethod
+    def get_entity_docstring(self, node: Node) -> Optional[str]:
+        """
+        Get the entity docstring from the node.
+
+        Args:
+            node (Node): The node.
+
+        Returns:
+            Optional[str]: The entity docstring.
+        """
+        pass
+    
+    @abstractmethod
+    def get_entity_types(self) -> list[str]:
+        """
+        Get the top level entity types for the language.
+
+        Returns:
+            list[str]: The list of top level entity types.
+        """
+
+        pass
+
+    @abstractmethod
+    def add_symbols(self, entity: Entity) -> None:
+        """
+        Add symbols to the entity.
+
+        Args:
+            entity (Entity): The entity to add symbols to.
+        """
+
+        pass
+
+    @abstractmethod
+    def resolve_symbol(self, files: dict[Path, File], lsp: SyncLanguageServer, file_path: Path, path: Path, key: str, symbol: Node) -> list[Entity]:
+        """
+        Resolve a symbol to entities.
+
+        Args:
+            lsp (SyncLanguageServer): The language server.
+            path (Path): The path to the file.
+            key (str): The symbol key.
+            symbol (Node): The symbol node.
+
+        Returns:
+            list[Entity]: The resolved entities.
+        """
+
+        pass
+
